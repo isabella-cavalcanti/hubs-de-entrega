@@ -68,20 +68,54 @@ def _openai(sistema, pergunta, segredos):
     return r.json()["choices"][0]["message"]["content"]
 
 
-def _gemini(sistema, pergunta, segredos):
-    modelo = _chave("GEMINI_MODEL", segredos) or "gemini-2.5-flash"
-    r = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent",
-        params={"key": _chave("GEMINI_API_KEY", segredos)},
-        json={
-            "system_instruction": {"parts": [{"text": sistema}]},
-            "contents": [{"role": "user", "parts": [{"text": pergunta}]}],
-            "generationConfig": {"temperature": 0.2},
-        },
-        timeout=60,
-    )
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta"
+_modelo_gemini = None  # descoberto na primeira chamada
+
+
+def _escolher_modelo_gemini(chave):
+    """Pergunta à API quais modelos existem e escolhe um 'flash' (rápido e grátis)."""
+    r = requests.get(f"{GEMINI_URL}/models", headers={"x-goog-api-key": chave}, timeout=30)
     r.raise_for_status()
-    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+    nomes = [m["name"].split("/")[-1] for m in r.json().get("models", [])
+             if "generateContent" in m.get("supportedGenerationMethods", [])]
+    flash = [n for n in nomes if "flash" in n and "lite" not in n
+             and "preview" not in n and "exp" not in n and "image" not in n and "tts" not in n]
+    return (sorted(flash)[-1] if flash else nomes[0])
+
+
+def _gemini(sistema, pergunta, segredos):
+    global _modelo_gemini
+    chave = _chave("GEMINI_API_KEY", segredos)
+    modelos = [m for m in (_chave("GEMINI_MODEL", segredos), _modelo_gemini,
+                           "gemini-flash-latest") if m]
+    corpo = {
+        "system_instruction": {"parts": [{"text": sistema}]},
+        "contents": [{"role": "user", "parts": [{"text": pergunta}]}],
+        "generationConfig": {"temperature": 0.2},
+    }
+    for tentativa in range(2):
+        for modelo in modelos:
+            # a chave vai no cabeçalho, nunca na URL (assim ela não aparece em mensagens de erro)
+            r = requests.post(f"{GEMINI_URL}/models/{modelo}:generateContent",
+                              headers={"x-goog-api-key": chave}, json=corpo, timeout=60)
+            if r.status_code == 404:
+                continue
+            r.raise_for_status()
+            _modelo_gemini = modelo
+            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        modelos = [_escolher_modelo_gemini(chave)]
+    raise requests.HTTPError("nenhum modelo do Gemini disponível para esta chave")
+
+
+def _erro_seguro(e):
+    """Mensagem de erro sem URL nem chave."""
+    resp = getattr(e, "response", None)
+    if resp is not None:
+        return {400: "pedido inválido (confira a chave)", 401: "chave inválida",
+                403: "chave sem permissão", 404: "modelo não encontrado",
+                429: "limite de uso grátis atingido, tente em 1 minuto"}.get(
+            resp.status_code, f"erro {resp.status_code}")
+    return str(e).split(" for url")[0].split("?")[0]
 
 
 def perguntar(pergunta: str, resumo: dict, segredos=None) -> tuple[str, str]:
@@ -94,7 +128,7 @@ def perguntar(pergunta: str, resumo: dict, segredos=None) -> tuple[str, str]:
         if prov == "gemini":
             return _gemini(sistema, pergunta, segredos), "gemini"
     except requests.RequestException as e:
-        return f"{resposta_local(pergunta, resumo)}\n\n_(A IA não respondeu: {e}. Resposta gerada localmente.)_", "local"
+        return f"{resposta_local(pergunta, resumo)}\n\n_(A IA não respondeu: {_erro_seguro(e)}. Resposta gerada localmente.)_", "local"
     return resposta_local(pergunta, resumo), "local"
 
 

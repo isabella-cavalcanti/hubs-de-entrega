@@ -2,6 +2,8 @@
 
 Onde uma empresa de delivery deveria abrir seus **hubs de entrega** em São Paulo para entregar **rápido** gastando **o mínimo**? E como explicar essa decisão para quem não é técnico?
 
+🔗 **Acesse o app:** https://appentregas.streamlit.app
+
 Este projeto junta duas coisas:
 - um **modelo de otimização (MILP)**, que decide quais hubs abrir e qual hub atende cada bairro;
 - uma camada de **IA generativa**, que **explica a decisão em linguagem natural** e escreve um resumo executivo.

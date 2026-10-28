@@ -91,18 +91,26 @@ def _gemini(sistema, pergunta, segredos):
     corpo = {
         "system_instruction": {"parts": [{"text": sistema}]},
         "contents": [{"role": "user", "parts": [{"text": pergunta}]}],
-        "generationConfig": {"temperature": 0.2},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 800,
+                             # pensa pouco: a resposta é curta e o app fica rápido
+                             "thinkingConfig": {"thinkingBudget": 0}},
     }
     for tentativa in range(2):
         for modelo in modelos:
             # a chave vai no cabeçalho, nunca na URL (assim ela não aparece em mensagens de erro)
             r = requests.post(f"{GEMINI_URL}/models/{modelo}:generateContent",
-                              headers={"x-goog-api-key": chave}, json=corpo, timeout=60)
+                              headers={"x-goog-api-key": chave}, json=corpo, timeout=90)
+            if r.status_code == 400 and "thinkingConfig" in corpo["generationConfig"]:
+                # alguns modelos não aceitam desligar o "pensamento": tenta de novo sem isso
+                corpo["generationConfig"].pop("thinkingConfig")
+                r = requests.post(f"{GEMINI_URL}/models/{modelo}:generateContent",
+                                  headers={"x-goog-api-key": chave}, json=corpo, timeout=90)
             if r.status_code == 404:
                 continue
             r.raise_for_status()
             _modelo_gemini = modelo
-            return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            partes = r.json()["candidates"][0]["content"]["parts"]
+            return "".join(p.get("text", "") for p in partes if not p.get("thought"))
         modelos = [_escolher_modelo_gemini(chave)]
     raise requests.HTTPError("nenhum modelo do Gemini disponível para esta chave")
 
@@ -115,12 +123,16 @@ def _erro_seguro(e):
                 403: "chave sem permissão", 404: "modelo não encontrado",
                 429: "limite de uso grátis atingido, tente em 1 minuto"}.get(
             resp.status_code, f"erro {resp.status_code}")
-    return str(e).split(" for url")[0].split("?")[0]
+    if isinstance(e, requests.Timeout):
+        return "a IA demorou demais para responder, tente de novo"
+    if isinstance(e, requests.ConnectionError):
+        return "sem conexão com a IA"
+    return str(e).split(" for url")[0].split("?")[0][:120]
 
 
 def perguntar(pergunta: str, resumo: dict, segredos=None) -> tuple[str, str]:
     """Devolve (resposta, origem). origem = 'openai', 'gemini' ou 'local'."""
-    sistema = INSTRUCOES.format(contexto=json.dumps(resumo, ensure_ascii=False))
+    sistema = INSTRUCOES.format(contexto=json.dumps(resumo, ensure_ascii=False, separators=(",", ":")))
     prov = provedor_disponivel(segredos)
     try:
         if prov == "openai":
